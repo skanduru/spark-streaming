@@ -1,6 +1,7 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, to_json, col, unbase64, base64, split, expr
-from pyspark.sql.types import StructField, StructType, StringType, BooleanType, ArrayType, DateType
+from pyspark.sql.types import StructField, StructType, FloatType, StringType, BooleanType, ArrayType, DateType
+import rpdb
 
 # create a StructType for the Kafka redis-server topic which has all changes made to Redis - before Spark 3.0.0, schema inference is not automatic
 # schema derived from the Note on The Redis Source for Kafka
@@ -24,23 +25,33 @@ redisMessageSchema = StructType(
 
 # create a StructType for the Customer JSON that comes from Redis- before Spark 3.0.0, schema inference is not automatic
 # from the JSON format for the cutomer defined below:
+# coming from redis-server, it is of the form:
+# {"customerId":"697986075","customerName":"John Phillips","reservationId":"1645877568114","amount":308.9}  
 customerMessageSchema = StructType (
     [
+        StructField("customerId", StringType()),
         StructField("customerName", StringType()),
-        StructField("email", StringType()),
-        StructField("birthDay", StringType())
+        StructField("reservationId", StringType()),
+        StructField("amount", FloatType())
     ]
 )
 
-# create a StructType for the Kafka stedi-events topic which has the Customer Risk JSON that comes from Redis- before Spark 3.0.0, schema inference is not automatic
-# from the kafka topic stedi events
-stediCustomerRiskSchema = StructType(
+# Schema for the second message is a reservation Message of the truck for the customer. It is of the form:
+# {"reservationId":"1645877578197","customerId":"273330770","customerName":"Liz Habschied","truckNumber":"3317","reservationDate":"2022-02-26T12:12:58.197Z","checkInStatus":"CheckedOut","origin":"Wisconsin","destination":"Wisconsin"}
+
+reservationMessageSchema = StructType (
     [
-        StructField("customer", StringType()),
-        StructField("score", StringType()),
-        StructField("riskDate", StringType()),
+        StructField("reservationId", StringType()),
+        StructField("customerId", StringType()),
+        StructField("customerName", StringType()),
+        StructField("truckNumber", StringType()),
+        StructField("reservationDate", StringType()),
+        StructField("checkInStatus", StringType()),
+        StructField("origin", StringType()),
+        StructField("destination", StringType()),
     ]
 )
+# 
 
 #create a spark application object and set log level to WARN
 spark = SparkSession.builder.appName("stedi-risk-data").getOrCreate()
@@ -64,7 +75,7 @@ redisEventStreamingDF = redisEventRawStreamingDF.selectExpr(
     "cast(key as string) rkey", "cast(value as string) redisEventJSON"
 )
 """
- Received output:
+ Received input messages:
 +--------------------+--------------------+
 |                rkey|      redisEventJSON|
 +--------------------+--------------------+
@@ -90,7 +101,7 @@ redisEventStreamingDF = redisEventRawStreamingDF.selectExpr(
 |com.moilioncircle...|{"key":"UmVzZXJ2Y...|
 +--------------------+--------------------+
 
-And we are only concerned about the "key" records, ignoring the rest...
+And we are only concerned with the "key" records, ignoring the rest...
 """
 
 # TO-DO:; parse the single column "value" with a json object in it, like this:
@@ -129,86 +140,118 @@ redisEventStreamingDF.withColumn("redisEventJSON", from_json("redisEventJSON",
 # +------------+-----+-----------+------------+---------+-----+-----+-----------------+
 #
 # storing them in a temporary view called RedisSortedSet
+# execute a sql statement against a temporary view, which statement takes the element field from the 0th element in the array of structs and create a column called encodedMessage
 encodedEventStreamingDF = spark.sql(
-    "select zSetEntries[0].element as encodedCustomer from RedisSortedSet")
+    "select key, zSetEntries[0].element as eventMessage from RedisSortedSet")
 
-# execute a sql statement against a temporary view, which statement takes the element field from the 0th element in the array of structs and create a column called encodedCustomer
+"""
++----------------+--------------------+
+|             key|        eventMessage|
++----------------+--------------------+
+|            null|                null|
+|    UGF5bWVudA==|                null|
+|UmVzZXJ2YXRpb24=|                null|
+|        VXNlcg==|                null|
+|    Q3VzdG9tZXI=|                null|
+|            null|                null|
+|    UGF5bWVudA==|eyJjdXN0b21lcklkI...|
+|UmVzZXJ2YXRpb24=|eyJyZXNlcnZhdGlvb...|
+|    UGF5bWVudA==|eyJjdXN0b21lcklkI...|
+|UmVzZXJ2YXRpb24=|eyJyZXNlcnZhdGlvb...|
+|    UGF5bWVudA==|eyJjdXN0b21lcklkI...|
++----------------+--------------------+
+"""
 
-# the reason we do it this way is that the syntax available select against a view is different than a dataframe, and it makes it easy to select the nth element of an array in a sql column
-encodedCustomerRecordsDF = encodedEventStreamingDF.withColumn(
-    "encodedCustomer", unbase64(encodedEventStreamingDF.encodedCustomer)
-    .cast("string"))
+
+# base64 decode redisEvents: into customerMessage and reservationMessage
+customerEventJSONifiedStreamDF = encodedEventStreamingDF.withColumn("eventMessage", unbase64(encodedEventStreamingDF.eventMessage).cast("string"))
+reservationEventJSONifiedStreamDF = encodedEventStreamingDF.withColumn("eventMessage", unbase64(encodedEventStreamingDF.eventMessage).cast("string"))
+
+# Filter out the messages based on its unique fields into payment and reservation records
+customerStreamDF = customerEventJSONifiedStreamDF.filter(~col("eventMessage").contains("truckNumber"))
+reservationStreamDF = reservationEventJSONifiedStreamDF.filter(col("eventMessage").contains("truckNumber"))
 
 
-# take the encodedCustomer column which is base64 encoded at first like this:
-# +--------------------+
-# |            customer|
-# +--------------------+
-# |[7B 22 73 74 61 7...|
-# +--------------------+
+# Now parse the JSON in the Customer record and store in a temporary view called CustomerRecords
 
-# and convert it to clear json like this:
-# +--------------------+
-# |            customer|
-# +--------------------+
-# |{"customerName":"...|
-#+--------------------+
-#
-# with this JSON format: {"customerName":"Sam Test","email":"sam.test@test.com","phone":"8015551212","birthDay":"2001-01-03"}
+customerStreamDF  \
+    .withColumn("eventMessage",  \
+    from_json("eventMessage", customerMessageSchema)) \
+    .select(col('eventMessage.*')) \
+    .createOrReplaceTempView('customerRecords')
 
-# parse the JSON in the Customer record and store in a temporary view called CustomerRecords
-encodedCustomerRecordsDF  \
-    .withColumn("encodedCustomerRecord",  \
-    from_json("encodedCustomerRecord", customerMessageSchema)) \
-    .select(col('encodedCustomerRecord.*')) \
-    .createOrReplaceTempView('CustomerRecords')
+# ANd parse the JSON in the reservation records store in a temporary view called reservationRecords
+
+reservationStreamDF  \
+    .withColumn("eventMessage",  \
+    from_json("eventMessage", reservationMessageSchema)) \
+    .select(col('eventMessage.*')) \
+    .createOrReplaceTempView('reservationRecords')
+
 
 # JSON parsing will set non-existent fields to null, so let's select just the fields we want, where they are not null as a new dataframe called emailAndBirthDayStreamingDF
+customerRecordsDF = spark.sql(
+    "select * from customerRecords "
+)
+
+
+reservationRecordsDF = spark.sql(
+    "select customerId as accountId, reservationId, customerName, truckNumber, reservationDate, checkInStatus, origin, destination from reservationRecords"
+)
 """
-CustomerRecordsDF = spark.sql(
-    "select email, birthday from CustomerRecords "
-    "where email is not null and birthDay is not null")
+reservationRecordsDF = spark.sql(
+    "select customerId as accountId, truckNumber, origin, destination from reservationRecords"
+)
 """
-CustomerRecordsDF = spark.sql("select * from CustomerRecords")
 
-# TO-DO: Split the birth year as a separate field from the birthday
-# TO-DO: Select only the birth year and email fields as a new streaming data frame called emailAndBirthYearStreamingDF
+# reservationRecordsDF.writeStream.outputMode("append").format("console").option("truncate", False).start().awaitTermination()
+# reservationRecordsDF.writeStream.outputMode("append").format("console").option("truncate", False).start().awaitTermination()
+"""
++----------+--------------+-------------+------+
+|customerId|customerName  |reservationId|amount|
++----------+--------------+-------------+------+
+|697986075 |John Phillips |1645877568114|308.9 |
+|486712698 |Manoj Phillips|1645877568117|778.82|
+|553120617 |Bobby Jones   |1645877568113|722.2 |
+|788935702 |Liz Wu        |1645877568124|909.25|
+|953701291 |Gail Fibonnaci|1645877568132|952.7 |
+|7001036   |Jaya Anderson |1645877568119|567.9 |
+|793829559 |Sean Jones    |1645877568117|438.84|
+|127200206 |Sean Ahmed    |1645877590210|710.38|
+|428115213 |Ben Hansen    |1645877568100|606.67|
+|793829559 |Sean Jones    |1645877568117|886.65|
+|526181430 |David Anandh  |1645877568113|230.54|
++----------+--------------+-------------+------+
 
-# TO-DO: using the spark application object, read a streaming dataframe from the Kafka topic stedi-events as the source
-# Be sure to specify the option that reads all the events from the topic including those that were published before you started the spark stream
-                                   
-# TO-DO: cast the value column in the streaming dataframe as a STRING 
++-------------+----------+----------------+-----------+------------------------
+|reservationId|customerId|customerName    |truckNumber|reservationDate         |checkInStatus|origin      |destination |
++-------------+------------+------------+
+|1645877578197|273330770 |Liz Habschied   |3317       |2022-02-26T12:12:58.197Z|CheckedOut   |Wisconsin   |Wisconsin   |
+|1645877580198|634834451 |Senthil Phillips|9616       |2022-02-26T12:13:00.198Z|CheckedOut   |Canada      |Texas       |
++-------------+----------+----------------+-----------+------------------------+-------------+------------+------------+
 
-# TO-DO: parse the JSON from the single column "value" with a json object in it, like this:
-# +------------+
-# | value      |
-# +------------+
-# |{"custom"...|
-# +------------+
+
+"""
+
+
+# join the streaming dataframes on the customerId to get all info in the same dataframe
+customerReservationDF = customerRecordsDF.join(reservationRecordsDF, expr ("""
+   customerId = accountId
+"""
+))
+
+# sink the joined dataframes to a new kafka topic to send the data to the STEDI graph application 
 #
-# and create separated fields like this:
-# +------------+-----+-----------+
-# |    customer|score| riskDate  |
-# +------------+-----+-----------+
-# |"sam@tes"...| -1.4| 2020-09...|
-# +------------+-----+-----------+
-#
-# storing them in a temporary view called CustomerRisk
+# customerReservationDF.writeStream.outputMode("append").format("console").option("truncate", False).start().awaitTermination()
+customerReservationDF.selectExpr("cast(customerId as string) as key", "to_json(struct(*)) as value") \
+    .writeStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "localhost:9092") \
+    .option("topic", "checkin-status") \
+    .option("checkpointLocation", "/tmp/kafkacheckpoint") \
+    .start() \
+    .awaitTermination()
 
-# TO-DO: execute a sql statement against a temporary view, selecting the customer and the score from the temporary view, creating a dataframe called customerRiskStreamingDF
-
-# TO-DO: join the streaming dataframes on the email address to get the risk score and the birth year in the same dataframe
-
-# TO-DO: sink the joined dataframes to a new kafka topic to send the data to the STEDI graph application 
-# +--------------------+-----+--------------------+---------+
-# |            customer|score|               email|birthYear|
-# +--------------------+-----+--------------------+---------+
-# |Santosh.Phillips@...| -0.5|Santosh.Phillips@...|     1960|
-# |Sean.Howard@test.com| -3.0|Sean.Howard@test.com|     1958|
-# |Suresh.Clark@test...| -5.0|Suresh.Clark@test...|     1956|
-# |  Lyn.Davis@test.com| -4.0|  Lyn.Davis@test.com|     1955|
-# |Sarah.Lincoln@tes...| -2.0|Sarah.Lincoln@tes...|     1959|
-# |Sarah.Clark@test.com| -4.0|Sarah.Clark@test.com|     1957|
-# +--------------------+-----+--------------------+---------+
-#
-# In this JSON Format {"customer":"Santosh.Fibonnaci@test.com","score":"28.5","email":"Santosh.Fibonnaci@test.com","birthYear":"1963"} 
+"""
+{"customerId":"560546029","customerName":"Craig Fibonnaci","reservationId":"1645930200883","amount":43.89,"accountId":"560546029","reservationId":"1645929824556","customerName":"Craig Fibonnaci","truckNumber":"8543","reservationDate":"2022-02-27T02:43:44.556Z","checkInStatus":"CheckedOut","origin":"Georgia","destination":"Arizona"}
+"""
