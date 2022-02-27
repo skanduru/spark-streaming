@@ -33,15 +33,6 @@ customerSchema = StructType (
     ]
 )
 
-# create a StructType for the Kafka stedi-events topic which has the Customer Risk JSON that comes from Redis- before Spark 3.0.0, schema inference is not automatic
-stediEventsSchema = StructType (
-    [
-        StructField("customer", StringType()),
-        StructField("score", FloatType()),
-        StructField("riskDate", StringType()),
-    ]
-)
-
 #create a spark application object and set the spark log level to WARN
 spark = SparkSession.builder.appName("stedi-risk-data").getOrCreate()
 spark.sparkContext.setLogLevel('WARN')
@@ -132,7 +123,7 @@ customerEventJSONifiedStreamDF  \
 
 # JSON parsing will set non-existent fields to null, so let's select just the fields we want, where they are not null as a new dataframe called emailAndBirthDayStreamingDF
 emailAndBirthDayStreamingDF = spark.sql(
-    "select email, birthday from CustomerRecords where email is not null and birthDay is not null")
+    "select email, birthDay from CustomerRecords where email is not null and birthDay is not null")
 
 
 # from the emailAndBirthDayStreamingDF dataframe select the email and the birth year (using the split function)
