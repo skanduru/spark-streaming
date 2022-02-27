@@ -1,6 +1,6 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, to_json, col, unbase64, base64, split, expr
-from pyspark.sql.types import StructField, StructType, StringType, BooleanType, ArrayType, DateType
+from pyspark.sql.types import StructField, StructType, StringType, FloatType, BooleanType, ArrayType, DateType
 
 # create a StructType for the Kafka redis-server topic which has all changes made to Redis - before Spark 3.0.0, schema inference is not automatic
 redisMessageSchema = StructType(
@@ -61,6 +61,7 @@ redisEventRawStreamingDF = spark                            \
 # cast the value column in the streaming dataframe as a STRING
 redisEventStreamingDF = redisEventRawStreamingDF.selectExpr(
     "cast(key as string) rkey", "cast(value as string) redisEventJSON"
+)
 
 # parse the single column "value" with a json object in it, like this:
 # +------------+
@@ -122,9 +123,9 @@ encodedEventStreamingDF = spark.sql(
 customerEventJSONifiedStreamDF = encodedEventStreamingDF.withColumn("eventMessage", unbase64(encodedEventStreamingDF.eventMessage).cast("string"))
 
 # parse the JSON in the Customer record and store in a temporary view called CustomerRecords
-customerStreamDF  \
+customerEventJSONifiedStreamDF  \
     .withColumn("eventMessage",  \
-    from_json("eventMessage", customerMessageSchema)) \
+    from_json("eventMessage", customerSchema)) \
     .select(col('eventMessage.*')) \
     .createOrReplaceTempView('customerRecords')
 
@@ -141,6 +142,7 @@ emailAndBirthDayStreamingDF = spark.sql(
 # TO-DO: Select only the birth year and email fields as a new streaming data frame called emailAndBirthYearStreamingDF
 emailAndBirthYearStreamingDF = emailAndBirthDayStreamingDF.withColumn(
     "birthYear", split("CustomerRecords.birthDay", "-").getItem(0).alias("birthYear"))
+emailAndBirthYearStreamingDF = emailAndBirthYearStreamingDF.drop("birthday")
 
 # sink the emailAndBirthYearStreamingDF dataframe to the console in append mode
 # 
