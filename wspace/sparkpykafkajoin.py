@@ -212,22 +212,12 @@ customerRiskStreamingDF.withColumn("stediEventJSON", from_json("stediEventJSON",
         .createOrReplaceTempView("CustomerRisk")
 
 # execute a sql statement against a temporary view, selecting the customer and the score from the temporary view, creating a dataframe called customerRiskStreamingDF
-customerRiskDF = spark.sql(
-    "select customer, score from CustomerRisk")
+customerRiskDF = spark.sql("select customer, score from CustomerRisk")
 
 # join the streaming dataframes on the email address to get the risk score and the birth year in the same dataframe
-do_join = False
-if do_join:
-    customerRiskProfileStreamingDF = customerRiskDF.join(emailAndBirthYearStreamingDF, expr ("""
-       customer = email
-    """
-    ))
-else:
-    """
-       XXX: There is an issue with STEDI application and no events are coming out.
-            So we can't join them until the producer is fixed in this environ
-    """
-    customerRiskProfileStreamingDF = emailAndBirthYearStreamingDF.withColumn("score", lit("25.0").cast(StringType()))
+customerRiskProfileStreamingDF = customerRiskDF.join(emailAndBirthYearStreamingDF,
+    expr (""" customer = email """)
+  )
 
 # sink the joined dataframes to a new kafka topic to send the data to the STEDI graph application
 # +--------------------+-----+--------------------+---------+
@@ -247,6 +237,6 @@ customerRiskProfileStreamingDF.selectExpr("cast(email as string) as key", "to_js
     .format("kafka") \
     .option("kafka.bootstrap.servers", "localhost:9092") \
     .option("topic", "risky-topic") \
-    .option("checkpointLocation", "/tmp/kafkacheckpoint") \
+    .option("checkpointLocation", "kafkacheckpoint") \
     .start() \
     .awaitTermination()

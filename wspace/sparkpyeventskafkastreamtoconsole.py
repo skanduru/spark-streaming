@@ -51,9 +51,9 @@ customerRiskStreamingDF.withColumn("stediEventJSON", from_json("stediEventJSON",
 
 # sink the customerRiskStreamingDF dataframe to the console in append mode
 #
-customerRiskStreamngDF = spark.sql(
+customerRiskDF = spark.sql(
     "select customer, score from CustomerRisk")
-customerRiskStreamingDF.writeStream.outputMode("append").format("console").option("truncate", False).start().awaitTermination()
+customerRiskDF.writeStream.outputMode("append").format("console").option("truncate", False).start().awaitTermination()
 # It should output like this:
 #
 # +--------------------+-----
